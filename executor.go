@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/graphql-go/graphql/gqlerrors"
 	"github.com/graphql-go/graphql/language/ast"
@@ -820,7 +821,87 @@ func defaultResolveTypeFn(p ResolveTypeParams, abstractType Abstract) *Object {
 	return nil
 }
 
-// defaultResolveFn If a resolve function is not given, then a default resolve behavior is used
+type typeField struct {
+	idx  []int
+	name string
+}
+
+type typeCache struct {
+	fields []typeField
+}
+
+type typesCache struct {
+	sync.RWMutex
+	m map[reflect.Type]*typeCache
+}
+
+func (s *typesCache) get(obj reflect.Type) *typeCache {
+	s.RLock()
+	item := s.m[obj]
+	s.RUnlock()
+	if item != nil {
+		return item
+	}
+	s.Lock()
+
+	item = &typeCache{}
+
+	for _, idx := range typeFields(obj, []int{}) {
+		fd := obj.FieldByIndex(idx)
+
+		fl := typeField{idx: idx}
+
+		tag := fd.Tag.Get("json")
+		keys := strings.Split(tag, ",")
+		if keys[0] != "-" {
+			fl.name = keys[0]
+		}
+		if fl.name == "" {
+			tag = fd.Tag.Get("graphql")
+			keys = strings.Split(tag, ",")
+			if keys[0] != "-" {
+				fl.name = keys[0]
+			}
+		}
+
+		if fl.name == "" {
+			fl.name = fd.Name
+		}
+
+		item.fields = append(item.fields, fl)
+	}
+
+	s.m[obj] = item
+
+	s.Unlock()
+
+	return item
+}
+
+var typeCaches = typesCache{m: make(map[reflect.Type]*typeCache)}
+
+func typeFields(t reflect.Type, idx []int) (res [][]int) {
+	for i := 0; i < t.NumField(); i++ {
+		fd := t.Field(i)
+
+		if fd.PkgPath != "" && !fd.Anonymous {
+			continue
+		}
+
+		idx1 := append(idx, fd.Index...)
+		if fd.Anonymous && fd.Type.Kind() == reflect.Struct {
+			for _, v := range typeFields(fd.Type, idx1) {
+				res = append(res, v)
+			}
+			continue
+		}
+
+		res = append(res, idx1)
+	}
+	return
+}
+
+// DefaultResolveFn If a resolve function is not given, then a default resolve behavior is used
 // which takes the property of the source object of the same name as the field
 // and returns it as the result, or if it's a function, returns the result
 // of calling that function.
@@ -834,29 +915,10 @@ func DefaultResolveFn(p ResolveParams) (interface{}, error) {
 		return nil, nil
 	}
 	if sourceVal.Type().Kind() == reflect.Struct {
-		for i := 0; i < sourceVal.NumField(); i++ {
-			valueField := sourceVal.Field(i)
-			typeField := sourceVal.Type().Field(i)
-			// try matching the field name first
-			if typeField.Name == p.Info.FieldName {
-				return valueField.Interface(), nil
-			}
-			tag := typeField.Tag
-			checkTag := func(tagName string) bool {
-				t := tag.Get(tagName)
-				tOptions := strings.Split(t, ",")
-				if len(tOptions) == 0 {
-					return false
-				}
-				if tOptions[0] != p.Info.FieldName {
-					return false
-				}
-				return true
-			}
-			if checkTag("json") || checkTag("graphql") {
-				return valueField.Interface(), nil
-			} else {
-				continue
+		t := typeCaches.get(sourceVal.Type())
+		for _, f := range t.fields {
+			if f.name == p.Info.FieldName {
+				return sourceVal.FieldByIndex(f.idx).Interface(), nil
 			}
 		}
 		return nil, nil

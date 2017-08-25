@@ -2,10 +2,11 @@ package graphql_test
 
 import (
 	"encoding/json"
-	"github.com/graphql-go/graphql"
-	"github.com/graphql-go/graphql/testutil"
 	"reflect"
 	"testing"
+
+	"github.com/graphql-go/graphql"
+	"github.com/graphql-go/graphql/testutil"
 )
 
 func testSchema(t *testing.T, testField *graphql.Field) graphql.Schema {
@@ -260,6 +261,52 @@ func TestExecutesResolveFunction_UsesProvidedResolveFunction_SourceIsStruct_With
 		Schema:        schema,
 		RequestString: `{ test(aInt: -123, aStr: "String!") { str, int } }`,
 	})
+	if !reflect.DeepEqual(expected, result.Data) {
+		t.Fatalf("Unexpected result, Diff: %v", testutil.Diff(expected, result.Data))
+	}
+}
+
+func TestExecutesResolveFunction_DefaultFunctionCallsMethods_SourceIsStruct_WithJSONTags_WithEmbedFields(t *testing.T) {
+
+	type SubObjectForEmbed struct {
+		ID string `json:"id"`
+	}
+	// For structs without JSON tags, it will map to upper-cased exported field names
+	type SubObjectWithJSONTagsEmbedFields struct {
+		SubObjectForEmbed
+		Str string `json:"str"`
+		Int int    `json:"int"`
+	}
+
+	schema := testSchema(t, &graphql.Field{
+		Type: graphql.NewObject(graphql.ObjectConfig{
+			Name:        "SubObject",
+			Description: "Maps GraphQL Object `SubObject` to Go struct `SubObjectWithJSONTags`",
+			Fields: graphql.Fields{
+				"id":  &graphql.Field{Type: graphql.String},
+				"str": &graphql.Field{Type: graphql.String},
+				"int": &graphql.Field{Type: graphql.Int},
+			},
+		}),
+		Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			r := &SubObjectWithJSONTagsEmbedFields{Str: "string", Int: 10}
+			r.ID = "IDHere"
+			return r, nil
+		},
+	})
+
+	expected := map[string]interface{}{
+		"test": map[string]interface{}{
+			"id":  "IDHere",
+			"str": "string",
+			"int": 10,
+		},
+	}
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: `{ test { id, str, int } }`,
+	})
+
 	if !reflect.DeepEqual(expected, result.Data) {
 		t.Fatalf("Unexpected result, Diff: %v", testutil.Diff(expected, result.Data))
 	}
